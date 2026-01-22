@@ -1,9 +1,9 @@
-<!DOCTYPE html>
+    <!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>Multiplayer Dots</title>
+    <title>RPG Dots</title>
     <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
     <style>
         *{margin:0;padding:0;box-sizing:border-box}
@@ -13,8 +13,9 @@
         button{padding:15px 30px;margin:5px;font-size:18px;cursor:pointer}
         input{padding:15px;font-size:18px;width:220px;text-transform:uppercase}
         #info{display:none}
-        #joystick{position:absolute;bottom:30px;left:30px;width:150px;height:150px;background:rgba(255,255,255,0.1);border-radius:50%;display:none}
-        #stick{position:absolute;width:60px;height:60px;background:rgba(255,255,255,0.4);border-radius:50%;top:50%;left:50%;transform:translate(-50%,-50%)}
+        #joystick{position:absolute;bottom:30px;left:30px;width:120px;height:120px;background:rgba(255,255,255,0.1);border-radius:50%;display:none}
+        #stick{position:absolute;width:50px;height:50px;background:rgba(255,255,255,0.4);border-radius:50%;top:50%;left:50%;transform:translate(-50%,-50%)}
+        #fireBtn{position:absolute;bottom:50px;right:30px;width:100px;height:100px;background:rgba(255,0,0,0.5);border-radius:50%;display:none;font-size:24px;font-weight:bold;border:none;color:#fff}
         #status{margin-top:10px;font-size:14px;color:#0f0}
     </style>
 </head>
@@ -37,12 +38,14 @@
     <div id="joystick">
         <div id="stick"></div>
     </div>
+    <button id="fireBtn">🚀</button>
 
 <script>
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
 const joystickEl = document.getElementById('joystick');
 const stickEl = document.getElementById('stick');
+const fireBtn = document.getElementById('fireBtn');
 const status = document.getElementById('status');
 
 let peer = null;
@@ -51,14 +54,18 @@ let isHost = false;
 let myId = Math.random().toString(36).substr(2, 9);
 let myColor = ['#ff6b6b','#4ecdc4','#ffe66d','#95e1d3','#f38181','#aa96da','#fcbad3','#a8d8ea'][Math.floor(Math.random()*8)];
 
-// Players now have: x, y (display), targetX, targetY (where they're going), vx, vy (velocity)
 let players = {};
 let myPos = { x: 0, y: 0 };
+let myAngle = 0; // Direction player is facing
 let velocity = { x: 0, y: 0 };
 let gameStarted = false;
 
-// Interpolation speed (higher = snappier, lower = smoother but more delay)
+let rockets = []; // { id, ownerId, x, y, vx, vy, angle }
+let explosions = []; // { x, y, frame, maxFrames }
+
 const LERP_SPEED = 0.2;
+const ROCKET_SPEED = 12;
+const EXPLOSION_FRAMES = 30;
 
 function resize() {
     canvas.width = window.innerWidth;
@@ -84,10 +91,12 @@ function hostGame() {
         document.getElementById('info').style.display = 'block';
         document.getElementById('roomCode').textContent = roomCode;
         joystickEl.style.display = 'block';
+        fireBtn.style.display = 'block';
         players[myId] = { 
             x: myPos.x, y: myPos.y, 
             targetX: myPos.x, targetY: myPos.y,
             vx: 0, vy: 0,
+            angle: 0,
             color: myColor 
         };
     });
@@ -135,6 +144,7 @@ function joinGame() {
             document.getElementById('info').style.display = 'block';
             document.getElementById('roomCode').textContent = roomCode;
             joystickEl.style.display = 'block';
+            fireBtn.style.display = 'block';
             
             conn.send({ 
                 type: 'join', 
@@ -143,6 +153,7 @@ function joinGame() {
                 y: myPos.y, 
                 vx: 0, 
                 vy: 0,
+                angle: 0,
                 color: myColor 
             });
         });
@@ -163,7 +174,7 @@ function getPlayersData() {
     let data = {};
     for (let id in players) {
         const p = players[id];
-        data[id] = { x: p.x, y: p.y, vx: p.vx || 0, vy: p.vy || 0, color: p.color };
+        data[id] = { x: p.x, y: p.y, vx: p.vx || 0, vy: p.vy || 0, angle: p.angle || 0, color: p.color };
     }
     return data;
 }
@@ -176,6 +187,7 @@ function handleData(data, conn) {
                 x: p.x, y: p.y,
                 targetX: p.x, targetY: p.y,
                 vx: p.vx || 0, vy: p.vy || 0,
+                angle: p.angle || 0,
                 color: p.color
             };
         }
@@ -183,6 +195,7 @@ function handleData(data, conn) {
             x: myPos.x, y: myPos.y, 
             targetX: myPos.x, targetY: myPos.y,
             vx: 0, vy: 0,
+            angle: 0,
             color: myColor 
         };
         updatePlayerCount();
@@ -193,6 +206,7 @@ function handleData(data, conn) {
             x: data.x, y: data.y, 
             targetX: data.x, targetY: data.y,
             vx: data.vx || 0, vy: data.vy || 0,
+            angle: data.angle || 0,
             color: data.color 
         };
         broadcastPlayers();
@@ -201,12 +215,39 @@ function handleData(data, conn) {
     else if (data.type === 'move') {
         if (players[data.id] && data.id !== myId) {
             const p = players[data.id];
-            // Set target position and velocity for interpolation
             p.targetX = data.x;
             p.targetY = data.y;
             p.vx = data.vx;
             p.vy = data.vy;
+            p.angle = data.angle;
         }
+        if (isHost) {
+            connections.forEach(c => {
+                if (c !== conn && c.open) c.send(data);
+            });
+        }
+    }
+    else if (data.type === 'rocket') {
+        // Add rocket from other player
+        rockets.push({
+            id: data.rocketId,
+            ownerId: data.ownerId,
+            x: data.x,
+            y: data.y,
+            vx: data.vx,
+            vy: data.vy,
+            angle: data.angle
+        });
+        if (isHost) {
+            connections.forEach(c => {
+                if (c !== conn && c.open) c.send(data);
+            });
+        }
+    }
+    else if (data.type === 'explode') {
+        explosions.push({ x: data.x, y: data.y, frame: 0, maxFrames: EXPLOSION_FRAMES });
+        // Remove rocket
+        rockets = rockets.filter(r => r.id !== data.rocketId);
         if (isHost) {
             connections.forEach(c => {
                 if (c !== conn && c.open) c.send(data);
@@ -222,16 +263,17 @@ function handleData(data, conn) {
                         x: p.x, y: p.y, 
                         targetX: p.x, targetY: p.y,
                         vx: 0, vy: 0,
+                        angle: p.angle || 0,
                         color: p.color 
                     };
                 } else {
                     players[id].targetX = p.x;
                     players[id].targetY = p.y;
+                    players[id].angle = p.angle || 0;
                     players[id].color = p.color;
                 }
             }
         }
-        // Remove players not in list
         for (let id in players) {
             if (id !== myId && !data.players[id]) {
                 delete players[id];
@@ -252,6 +294,53 @@ function broadcastPlayers() {
 function updatePlayerCount() {
     document.getElementById('playerCount').textContent = Object.keys(players).length;
 }
+
+function fireRocket() {
+    if (!gameStarted) return;
+    
+    const rocketId = myId + '-' + Date.now();
+    const rocket = {
+        id: rocketId,
+        ownerId: myId,
+        x: myPos.x + Math.cos(myAngle) * 40,
+        y: myPos.y + Math.sin(myAngle) * 40,
+        vx: Math.cos(myAngle) * ROCKET_SPEED,
+        vy: Math.sin(myAngle) * ROCKET_SPEED,
+        angle: myAngle
+    };
+    
+    rockets.push(rocket);
+    
+    // Broadcast rocket
+    const msg = { 
+        type: 'rocket', 
+        rocketId: rocket.id,
+        ownerId: rocket.ownerId,
+        x: rocket.x, 
+        y: rocket.y, 
+        vx: rocket.vx, 
+        vy: rocket.vy,
+        angle: rocket.angle
+    };
+    connections.forEach(c => {
+        if (c.open) c.send(msg);
+    });
+}
+
+// Fire button
+fireBtn.addEventListener('touchstart', e => {
+    e.preventDefault();
+    fireRocket();
+});
+fireBtn.addEventListener('click', fireRocket);
+
+// Spacebar to fire
+window.addEventListener('keydown', e => {
+    if (e.code === 'Space' && gameStarted) {
+        e.preventDefault();
+        fireRocket();
+    }
+});
 
 // Joystick
 let joystickActive = false;
@@ -292,7 +381,7 @@ document.addEventListener('touchend', e => {
 function handleJoystick(touch) {
     const dx = touch.clientX - joystickCenter.x;
     const dy = touch.clientY - joystickCenter.y;
-    const maxDist = 45;
+    const maxDist = 35;
     const dist = Math.min(Math.sqrt(dx*dx + dy*dy), maxDist);
     const angle = Math.atan2(dy, dx);
     
@@ -303,6 +392,10 @@ function handleJoystick(touch) {
     const speed = 5;
     velocity.x = (dist / maxDist) * Math.cos(angle) * speed;
     velocity.y = (dist / maxDist) * Math.sin(angle) * speed;
+    
+    if (dist > 5) {
+        myAngle = angle;
+    }
 }
 
 // Keyboard
@@ -316,20 +409,28 @@ function lerp(a, b, t) {
     return a + (b - a) * t;
 }
 
+function lerpAngle(a, b, t) {
+    let diff = b - a;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    return a + diff * t;
+}
+
 function update() {
     if (!gameStarted) return;
     
     // Keyboard input
     let kx = 0, ky = 0;
-    if (keys['w'] || keys['ArrowUp']) ky = -1;
-    if (keys['s'] || keys['ArrowDown']) ky = 1;
-    if (keys['a'] || keys['ArrowLeft']) kx = -1;
-    if (keys['d'] || keys['ArrowRight']) kx = 1;
+    if (keys['w'] || keys['arrowup']) ky = -1;
+    if (keys['s'] || keys['arrowdown']) ky = 1;
+    if (keys['a'] || keys['arrowleft']) kx = -1;
+    if (keys['d'] || keys['arrowright']) kx = 1;
     
     if (kx !== 0 || ky !== 0) {
         const len = Math.sqrt(kx*kx + ky*ky);
         velocity.x = (kx / len) * 5;
         velocity.y = (ky / len) * 5;
+        myAngle = Math.atan2(ky, kx);
     } else if (!joystickActive) {
         velocity.x = 0;
         velocity.y = 0;
@@ -341,30 +442,62 @@ function update() {
     myPos.x = Math.max(25, Math.min(canvas.width - 25, myPos.x));
     myPos.y = Math.max(25, Math.min(canvas.height - 25, myPos.y));
     
-    // Update my player data (no interpolation for self)
     players[myId] = { 
         x: myPos.x, y: myPos.y, 
         targetX: myPos.x, targetY: myPos.y,
         vx: velocity.x, vy: velocity.y,
+        angle: myAngle,
         color: myColor 
     };
     
-    // INTERPOLATE other players smoothly!
+    // Interpolate other players
     for (let id in players) {
         if (id === myId) continue;
-        
         const p = players[id];
-        
-        // Predict where they're going based on velocity
         const predictedX = p.targetX + (p.vx || 0);
         const predictedY = p.targetY + (p.vy || 0);
-        
-        // Smooth interpolation towards predicted position
         p.x = lerp(p.x, predictedX, LERP_SPEED);
         p.y = lerp(p.y, predictedY, LERP_SPEED);
+        p.displayAngle = lerpAngle(p.displayAngle || p.angle, p.angle, 0.2);
     }
     
-    // Send position at 20fps (every 50ms)
+    // Update rockets
+    for (let i = rockets.length - 1; i >= 0; i--) {
+        const r = rockets[i];
+        r.x += r.vx;
+        r.y += r.vy;
+        
+        // Check if out of bounds - explode
+        if (r.x < -50 || r.x > canvas.width + 50 || r.y < -50 || r.y > canvas.height + 50) {
+            createExplosion(r);
+            rockets.splice(i, 1);
+            continue;
+        }
+        
+        // Check collision with players
+        for (let id in players) {
+            if (id === r.ownerId) continue;
+            const p = players[id];
+            const dx = p.x - r.x;
+            const dy = p.y - r.y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            if (dist < 30) {
+                createExplosion(r);
+                rockets.splice(i, 1);
+                break;
+            }
+        }
+    }
+    
+    // Update explosions
+    for (let i = explosions.length - 1; i >= 0; i--) {
+        explosions[i].frame++;
+        if (explosions[i].frame >= explosions[i].maxFrames) {
+            explosions.splice(i, 1);
+        }
+    }
+    
+    // Send position
     const now = Date.now();
     if (now - lastSend > 50) {
         lastSend = now;
@@ -374,7 +507,8 @@ function update() {
             x: myPos.x, 
             y: myPos.y,
             vx: velocity.x,
-            vy: velocity.y
+            vy: velocity.y,
+            angle: myAngle
         };
         connections.forEach(c => {
             if (c.open) c.send(msg);
@@ -382,32 +516,222 @@ function update() {
     }
 }
 
+function createExplosion(rocket) {
+    explosions.push({ x: rocket.x, y: rocket.y, frame: 0, maxFrames: EXPLOSION_FRAMES });
+    
+    // Broadcast explosion
+    const msg = { 
+        type: 'explode', 
+        rocketId: rocket.id,
+        x: rocket.x, 
+        y: rocket.y 
+    };
+    connections.forEach(c => {
+        if (c.open) c.send(msg);
+    });
+}
+
+function drawPlayer(p, isMe) {
+    const angle = isMe ? myAngle : (p.displayAngle || p.angle || 0);
+    
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    
+    // Shadow
+    ctx.beginPath();
+    ctx.arc(3, 3, 25, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
+    ctx.fill();
+    
+    // Body
+    ctx.beginPath();
+    ctx.arc(0, 0, 25, 0, Math.PI * 2);
+    ctx.fillStyle = p.color;
+    ctx.fill();
+    
+    if (isMe) {
+        ctx.strokeStyle = '#fff';
+        ctx.lineWidth = 3;
+        ctx.stroke();
+    }
+    
+    // RPG Launcher on shoulder
+    ctx.save();
+    ctx.rotate(angle);
+    
+    // RPG tube
+    ctx.fillStyle = '#333';
+    ctx.fillRect(10, -8, 45, 8);
+    
+    // RPG front cone
+    ctx.fillStyle = '#555';
+    ctx.beginPath();
+    ctx.moveTo(55, -8);
+    ctx.lineTo(62, -4);
+    ctx.lineTo(55, 0);
+    ctx.closePath();
+    ctx.fill();
+    
+    // RPG back handle
+    ctx.fillStyle = '#444';
+    ctx.fillRect(5, -5, 10, 12);
+    
+    // RPG grip
+    ctx.fillStyle = '#222';
+    ctx.fillRect(15, 0, 8, 10);
+    
+    // Rocket tip visible in tube
+    ctx.fillStyle = '#ff4444';
+    ctx.beginPath();
+    ctx.arc(50, -4, 3, 0, Math.PI * 2);
+    ctx.fill();
+    
+    ctx.restore();
+    
+    // Eyes (face direction)
+    ctx.save();
+    ctx.rotate(angle);
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(12, -6, 5, 0, Math.PI * 2);
+    ctx.arc(12, 6, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#000';
+    ctx.beginPath();
+    ctx.arc(14, -6, 2.5, 0, Math.PI * 2);
+    ctx.arc(14, 6, 2.5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+    
+    ctx.restore();
+}
+
+function drawRocket(r) {
+    ctx.save();
+    ctx.translate(r.x, r.y);
+    ctx.rotate(r.angle);
+    
+    // Rocket body
+    ctx.fillStyle = '#666';
+    ctx.fillRect(-15, -4, 25, 8);
+    
+    // Warhead
+    ctx.fillStyle = '#ff4444';
+    ctx.beginPath();
+    ctx.moveTo(10, -4);
+    ctx.lineTo(18, 0);
+    ctx.lineTo(10, 4);
+    ctx.closePath();
+    ctx.fill();
+    
+    // Fins
+    ctx.fillStyle = '#444';
+    ctx.beginPath();
+    ctx.moveTo(-15, -4);
+    ctx.lineTo(-22, -10);
+    ctx.lineTo(-15, -2);
+    ctx.closePath();
+    ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(-15, 4);
+    ctx.lineTo(-22, 10);
+    ctx.lineTo(-15, 2);
+    ctx.closePath();
+    ctx.fill();
+    
+    // Flame trail
+    const flameLen = 10 + Math.random() * 15;
+    const gradient = ctx.createLinearGradient(-15, 0, -15 - flameLen, 0);
+    gradient.addColorStop(0, '#ff6600');
+    gradient.addColorStop(0.3, '#ffff00');
+    gradient.addColorStop(1, 'rgba(255,100,0,0)');
+    ctx.fillStyle = gradient;
+    ctx.beginPath();
+    ctx.moveTo(-15, -3);
+    ctx.lineTo(-15 - flameLen, 0);
+    ctx.lineTo(-15, 3);
+    ctx.closePath();
+    ctx.fill();
+    
+    ctx.restore();
+}
+
+function drawExplosion(e) {
+    const progress = e.frame / e.maxFrames;
+    const maxRadius = 80;
+    
+    // Multiple expanding rings
+    for (let ring = 0; ring < 4; ring++) {
+        const ringProgress = Math.max(0, progress - ring * 0.1);
+        if (ringProgress <= 0) continue;
+        
+        const radius = ringProgress * maxRadius * (1 + ring * 0.3);
+        const alpha = (1 - ringProgress) * (1 - ring * 0.2);
+        
+        if (alpha <= 0) continue;
+        
+        ctx.beginPath();
+        ctx.arc(e.x, e.y, radius, 0, Math.PI * 2);
+        
+        if (ring === 0) {
+            ctx.fillStyle = `rgba(255, 255, 200, ${alpha})`;
+        } else if (ring === 1) {
+            ctx.fillStyle = `rgba(255, 200, 50, ${alpha * 0.8})`;
+        } else if (ring === 2) {
+            ctx.fillStyle = `rgba(255, 100, 0, ${alpha * 0.6})`;
+        } else {
+            ctx.fillStyle = `rgba(100, 50, 0, ${alpha * 0.4})`;
+        }
+        ctx.fill();
+    }
+    
+    // Sparks / debris
+    if (progress < 0.7) {
+        const sparkCount = 12;
+        for (let i = 0; i < sparkCount; i++) {
+            const angle = (i / sparkCount) * Math.PI * 2 + e.frame * 0.1;
+            const dist = progress * maxRadius * 1.5 * (0.5 + Math.random() * 0.5);
+            const sparkX = e.x + Math.cos(angle) * dist;
+            const sparkY = e.y + Math.sin(angle) * dist;
+            const sparkSize = (1 - progress) * 6;
+            
+            ctx.beginPath();
+            ctx.arc(sparkX, sparkY, sparkSize, 0, Math.PI * 2);
+            ctx.fillStyle = `rgba(255, ${150 + Math.random() * 100}, 0, ${1 - progress})`;
+            ctx.fill();
+        }
+    }
+    
+    // Smoke
+    if (progress > 0.3) {
+        const smokeProgress = (progress - 0.3) / 0.7;
+        const smokeRadius = smokeProgress * maxRadius * 1.2;
+        const smokeAlpha = (1 - smokeProgress) * 0.5;
+        
+        ctx.beginPath();
+        ctx.arc(e.x, e.y - smokeProgress * 20, smokeRadius, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(80, 80, 80, ${smokeAlpha})`;
+        ctx.fill();
+    }
+}
+
 function draw() {
     ctx.fillStyle = '#111';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     
-    // Draw all players
+    // Draw rockets
+    for (let r of rockets) {
+        drawRocket(r);
+    }
+    
+    // Draw players
     for (let id in players) {
-        const p = players[id];
-        
-        // Shadow
-        ctx.beginPath();
-        ctx.arc(p.x + 3, p.y + 3, 25, 0, Math.PI * 2);
-        ctx.fillStyle = 'rgba(0,0,0,0.3)';
-        ctx.fill();
-        
-        // Main dot
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, 25, 0, Math.PI * 2);
-        ctx.fillStyle = p.color;
-        ctx.fill();
-        
-        // White ring for self
-        if (id === myId) {
-            ctx.strokeStyle = '#fff';
-            ctx.lineWidth = 3;
-            ctx.stroke();
-        }
+        drawPlayer(players[id], id === myId);
+    }
+    
+    // Draw explosions on top
+    for (let e of explosions) {
+        drawExplosion(e);
     }
 }
 
