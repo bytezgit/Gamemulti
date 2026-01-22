@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Multiplayer Dots</title>
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+    <style>
+        *{margin:0;padding:0;box-sizing:border-box}
+        body{overflow:hidden;touch-action:none;background:#111;font-family:sans-serif;color:#fff}
+        #canvas{display:block}
+        #ui{position:absolute;top:10px;left:10px;z-index:10}
+        button{padding:15px 30px;margin:5px;font-size:18px;cursor:pointer}
+        input{padding:15px;font-size:18px;width:220px;text-transform:uppercase}
+        #info{display:none}
+        #joystick{position:absolute;bottom:30px;left:30px;width:150px;height:150px;background:rgba(255,255,255,0.1);border-radius:50%;display:none}
+        #stick{position:absolute;width:60px;height:60px;background:rgba(255,255,255,0.4);border-radius:50%;top:50%;left:50%;transform:translate(-50%,-50%)}
+        #status{margin-top:10px;font-size:14px;color:#0f0}
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    
+    <div id="ui">
+        <div id="menu">
+            <button onclick="hostGame()">HOST GAME</button><br><br>
+            <input type="text" id="joinCode" placeholder="Room Code"><br>
+            <button onclick="joinGame()">JOIN GAME</button>
+            <div id="status"></div>
+        </div>
+        <div id="info">
+            <div style="font-size:24px">Room: <b id="roomCode"></b></div>
+            <div>Players: <span id="playerCount">1</span></div>
+            <div style="font-size:12px;margin-top:5px">(Share room code with friends!)</div>
+        </div>
+    </div>
+    
+    <div id="joystick">
+        <div id="stick"></div>
+    </div>
+
+<script>
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const joystickEl = document.getElementById('joystick');
+const stickEl = document.getElementById('stick');
+const status = document.getElementById('status');
+
+let peer = null;
+let connections = [];
+let isHost = false;
+let myId = Math.random().toString(36).substr(2, 9);
+let myColor = ['#ff6b6b','#4ecdc4','#ffe66d','#95e1d3','#f38181','#aa96da','#fcbad3','#a8d8ea'][Math.floor(Math.random()*8)];
+
+let players = {};
+let myPos = { x: 0, y: 0 };
+let velocity = { x: 0, y: 0 };
+let gameStarted = false;
+
+function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    if (!gameStarted) {
+        myPos.x = canvas.width / 2;
+        myPos.y = canvas.height / 2;
+    }
+}
+window.addEventListener('resize', resize);
+resize();
+
+function hostGame() {
+    status.textContent = 'Creating room...';
+    const roomCode = Math.random().toString(36).substr(2, 5).toUpperCase();
+    
+    peer = new Peer('dotgame2024-' + roomCode, {
+        debug: 0
+    });
+    
+    peer.on('open', () => {
+        isHost = true;
+        gameStarted = true;
+        document.getElementById('menu').style.display = 'none';
+        document.getElementById('info').style.display = 'block';
+        document.getElementById('roomCode').textContent = roomCode;
+        joystickEl.style.display = 'block';
+        players[myId] = { x: myPos.x, y: myPos.y, color: myColor };
+    });
+    
+    peer.on('connection', conn => {
+        console.log('Player connecting...');
+        connections.push(conn);
+        
+        conn.on('open', () => {
+            console.log('Player connected!');
+            conn.send({ type: 'welcome', players: players });
+        });
+        
+        conn.on('data', data => handleData(data, conn));
+        
+        conn.on('close', () => {
+            connections = connections.filter(c => c !== conn);
+            if (conn.playerId) {
+                delete players[conn.playerId];
+                broadcastPlayers();
+            }
+        });
+    });
+    
+    peer.on('error', err => {
+        status.textContent = 'Error: ' + err.type;
+        console.error(err);
+    });
+}
+
+function joinGame() {
+    const roomCode = document.getElementById('joinCode').value.toUpperCase().trim();
+    if (!roomCode) {
+        status.textContent = 'Enter a room code!';
+        return;
+    }
+    
+    status.textContent = 'Connecting...';
+    
+    peer = new Peer(undefined, { debug: 0 });
+    
+    peer.on('open', () => {
+        const conn = peer.connect('dotgame2024-' + roomCode, { reliable: true });
+        connections.push(conn);
+        
+        conn.on('open', () => {
+            gameStarted = true;
+            document.getElementById('menu').style.display = 'none';
+            document.getElementById('info').style.display = 'block';
+            document.getElementById('roomCode').textContent = roomCode;
+            joystickEl.style.display = 'block';
+            
+            conn.send({ type: 'join', id: myId, x: myPos.x, y: myPos.y, color: myColor });
+        });
+        
+        conn.on('data', data => handleData(data, conn));
+        
+        conn.on('error', err => {
+            status.textContent = 'Connection error!';
+        });
+    });
+    
+    peer.on('error', err => {
+        if (err.type === 'peer-unavailable') {
+            status.textContent = 'Room not found!';
+        } else {
+            status.textContent = 'Error: ' + err.type;
+        }
+    });
+}
+
+function handleData(data, conn) {
+    if (data.type === 'welcome') {
+        players = data.players;
+        players[myId] = { x: myPos.x, y: myPos.y, color: myColor };
+        updatePlayerCount();
+    }
+    else if (data.type === 'join') {
+        conn.playerId = data.id;
+        players[data.id] = { x: data.x, y: data.y, color: data.color };
+        broadcastPlayers();
+        updatePlayerCount();
+    }
+    else if (data.type === 'move') {
+        if (players[data.id]) {
+            players[data.id].x = data.x;
+            players[data.id].y = data.y;
+        }
+        if (isHost) {
+            connections.forEach(c => {
+                if (c !== conn && c.open) c.send(data);
+            });
+        }
+    }
+    else if (data.type === 'players') {
+        for (let id in data.players) {
+            if (id !== myId) {
+                players[id] = data.players[id];
+            }
+        }
+        updatePlayerCount();
+    }
+}
+
+function broadcastPlayers() {
+    const msg = { type: 'players', players: players };
+    connections.forEach(c => {
+        if (c.open) c.send(msg);
+    });
+    updatePlayerCount();
+}
+
+function updatePlayerCount() {
+    document.getElementById('playerCount').textContent = Object.keys(players).length;
+}
+
+// Joystick
+let joystickActive = false;
+let joystickCenter = { x: 0, y: 0 };
+let joystickTouchId = null;
+
+joystickEl.addEventListener('touchstart', e => {
+    e.preventDefault();
+    const touch = e.changedTouches[0];
+    joystickTouchId = touch.identifier;
+    joystickActive = true;
+    const rect = joystickEl.getBoundingClientRect();
+    joystickCenter = { x: rect.left + rect.width/2, y: rect.top + rect.height/2 };
+    handleJoystick(touch);
+});
+
+document.addEventListener('touchmove', e => {
+    if (!joystickActive) return;
+    for (let touch of e.changedTouches) {
+        if (touch.identifier === joystickTouchId) {
+            handleJoystick(touch);
+            e.preventDefault();
+        }
+    }
+}, { passive: false });
+
+document.addEventListener('touchend', e => {
+    for (let touch of e.changedTouches) {
+        if (touch.identifier === joystickTouchId) {
+            joystickActive = false;
+            joystickTouchId = null;
+            velocity = { x: 0, y: 0 };
+            stickEl.style.transform = 'translate(-50%, -50%)';
+        }
+    }
+});
+
+function handleJoystick(touch) {
+    const dx = touch.clientX - joystickCenter.x;
+    const dy = touch.clientY - joystickCenter.y;
+    const maxDist = 45;
+    const dist = Math.min(Math.sqrt(dx*dx + dy*dy), maxDist);
+    const angle = Math.atan2(dy, dx);
+    
+    const stickX = Math.cos(angle) * dist;
+    const stickY = Math.sin(angle) * dist;
+    stickEl.style.transform = `translate(calc(-50% + ${stickX}px), calc(-50% + ${stickY}px))`;
+    
+    const speed = 6;
+    velocity.x = (dist / maxDist) * Math.cos(angle) * speed;
+    velocity.y = (dist / maxDist) * Math.sin(angle) * speed;
+}
+
+// Keyboard
+const keys = {};
+window.addEventListener('keydown', e => { keys[e.key.toLowerCase()] = true; keys[e.code] = true; });
+window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; keys[e.code] = false; });
+
+let lastSend = 0;
+
+function update() {
+    if (!gameStarted) return;
+    
+    // Keyboard
+    let kx = 0, ky = 0;
+    if (keys['w'] || keys['ArrowUp']) ky = -1;
+    if (keys['s'] || keys['ArrowDown']) ky = 1;
+    if (keys['a'] || keys['ArrowLeft']) kx = -1;
+    if (keys['d'] || keys['ArrowRight']) kx = 1;
+    
+    if (kx !== 0 || ky !== 0) {
+        const len = Math.sqrt(kx*kx + ky*ky);
+        velocity.x = (kx / len) * 6;
+        velocity.y = (ky / len) * 6;
+    } else if (!joystickActive) {
+        velocity.x = 0;
+        velocity.y = 0;
+    }
+    
+    myPos.x += velocity.x;
+    myPos.y += velocity.y;
+    myPos.x = Math.max(25, Math.min(canvas.width - 25, myPos.x));
+    myPos.y = Math.max(25, Math.min(canvas.height - 25, myPos.y));
+    
+    players[myId] = { x: myPos.x, y: myPos.y, color: myColor };
+    
+    // Send position
+    const now = Date.now();
+    if (now - lastSend > 33) { // ~30fps network
+        lastSend = now;
+        const msg = { type: 'move', id: myId, x: myPos.x, y: myPos.y };
+        connections.forEach(c => {
+            if (c.open) c.send(msg);
+        });
+    }
+}
+
+function draw() {
+    ctx.fillStyle = '#111';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    // Draw players
+    for (let id in players) {
+        const p = players[id];
+        
+        // Shadow
+        ctx.beginPath();
+        ctx.arc(p.x + 3, p.y + 3, 25, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.fill();
+        
+        // Dot
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 25, 0, Math.PI * 2);
+        ctx.fillStyle = p.color;
+        ctx.fill();
+        
+        // Outline for self
+        if (id === myId) {
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+        }
+    }
+    
+    // Instructions
+    if (!gameStarted) {
+        ctx.fillStyle = '#666';
+        ctx.font = '16px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('Host or Join a game to start', canvas.width/2, canvas.height/2);
+    }
+}
+
+function gameLoop() {
+    update();
+    draw();
+    requestAnimationFrame(gameLoop);
+}
+
+gameLoop();
+</script>
+</body>
+</html>
