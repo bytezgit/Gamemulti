@@ -31,7 +31,6 @@
         <div id="info">
             <div style="font-size:24px">Room: <b id="roomCode"></b></div>
             <div>Players: <span id="playerCount">1</span></div>
-            <div style="font-size:12px;margin-top:5px">(Share room code with friends!)</div>
         </div>
     </div>
     
@@ -52,10 +51,14 @@ let isHost = false;
 let myId = Math.random().toString(36).substr(2, 9);
 let myColor = ['#ff6b6b','#4ecdc4','#ffe66d','#95e1d3','#f38181','#aa96da','#fcbad3','#a8d8ea'][Math.floor(Math.random()*8)];
 
+// Players now have: x, y (display), targetX, targetY (where they're going), vx, vy (velocity)
 let players = {};
 let myPos = { x: 0, y: 0 };
 let velocity = { x: 0, y: 0 };
 let gameStarted = false;
+
+// Interpolation speed (higher = snappier, lower = smoother but more delay)
+const LERP_SPEED = 0.2;
 
 function resize() {
     canvas.width = window.innerWidth;
@@ -72,9 +75,7 @@ function hostGame() {
     status.textContent = 'Creating room...';
     const roomCode = Math.random().toString(36).substr(2, 5).toUpperCase();
     
-    peer = new Peer('dotgame2024-' + roomCode, {
-        debug: 0
-    });
+    peer = new Peer('dotgame2024-' + roomCode, { debug: 0 });
     
     peer.on('open', () => {
         isHost = true;
@@ -83,16 +84,19 @@ function hostGame() {
         document.getElementById('info').style.display = 'block';
         document.getElementById('roomCode').textContent = roomCode;
         joystickEl.style.display = 'block';
-        players[myId] = { x: myPos.x, y: myPos.y, color: myColor };
+        players[myId] = { 
+            x: myPos.x, y: myPos.y, 
+            targetX: myPos.x, targetY: myPos.y,
+            vx: 0, vy: 0,
+            color: myColor 
+        };
     });
     
     peer.on('connection', conn => {
-        console.log('Player connecting...');
         connections.push(conn);
         
         conn.on('open', () => {
-            console.log('Player connected!');
-            conn.send({ type: 'welcome', players: players });
+            conn.send({ type: 'welcome', players: getPlayersData() });
         });
         
         conn.on('data', data => handleData(data, conn));
@@ -108,7 +112,6 @@ function hostGame() {
     
     peer.on('error', err => {
         status.textContent = 'Error: ' + err.type;
-        console.error(err);
     });
 }
 
@@ -120,7 +123,6 @@ function joinGame() {
     }
     
     status.textContent = 'Connecting...';
-    
     peer = new Peer(undefined, { debug: 0 });
     
     peer.on('open', () => {
@@ -134,14 +136,18 @@ function joinGame() {
             document.getElementById('roomCode').textContent = roomCode;
             joystickEl.style.display = 'block';
             
-            conn.send({ type: 'join', id: myId, x: myPos.x, y: myPos.y, color: myColor });
+            conn.send({ 
+                type: 'join', 
+                id: myId, 
+                x: myPos.x, 
+                y: myPos.y, 
+                vx: 0, 
+                vy: 0,
+                color: myColor 
+            });
         });
         
         conn.on('data', data => handleData(data, conn));
-        
-        conn.on('error', err => {
-            status.textContent = 'Connection error!';
-        });
     });
     
     peer.on('error', err => {
@@ -153,22 +159,53 @@ function joinGame() {
     });
 }
 
+function getPlayersData() {
+    let data = {};
+    for (let id in players) {
+        const p = players[id];
+        data[id] = { x: p.x, y: p.y, vx: p.vx || 0, vy: p.vy || 0, color: p.color };
+    }
+    return data;
+}
+
 function handleData(data, conn) {
     if (data.type === 'welcome') {
-        players = data.players;
-        players[myId] = { x: myPos.x, y: myPos.y, color: myColor };
+        for (let id in data.players) {
+            const p = data.players[id];
+            players[id] = {
+                x: p.x, y: p.y,
+                targetX: p.x, targetY: p.y,
+                vx: p.vx || 0, vy: p.vy || 0,
+                color: p.color
+            };
+        }
+        players[myId] = { 
+            x: myPos.x, y: myPos.y, 
+            targetX: myPos.x, targetY: myPos.y,
+            vx: 0, vy: 0,
+            color: myColor 
+        };
         updatePlayerCount();
     }
     else if (data.type === 'join') {
         conn.playerId = data.id;
-        players[data.id] = { x: data.x, y: data.y, color: data.color };
+        players[data.id] = { 
+            x: data.x, y: data.y, 
+            targetX: data.x, targetY: data.y,
+            vx: data.vx || 0, vy: data.vy || 0,
+            color: data.color 
+        };
         broadcastPlayers();
         updatePlayerCount();
     }
     else if (data.type === 'move') {
-        if (players[data.id]) {
-            players[data.id].x = data.x;
-            players[data.id].y = data.y;
+        if (players[data.id] && data.id !== myId) {
+            const p = players[data.id];
+            // Set target position and velocity for interpolation
+            p.targetX = data.x;
+            p.targetY = data.y;
+            p.vx = data.vx;
+            p.vy = data.vy;
         }
         if (isHost) {
             connections.forEach(c => {
@@ -179,7 +216,25 @@ function handleData(data, conn) {
     else if (data.type === 'players') {
         for (let id in data.players) {
             if (id !== myId) {
-                players[id] = data.players[id];
+                const p = data.players[id];
+                if (!players[id]) {
+                    players[id] = { 
+                        x: p.x, y: p.y, 
+                        targetX: p.x, targetY: p.y,
+                        vx: 0, vy: 0,
+                        color: p.color 
+                    };
+                } else {
+                    players[id].targetX = p.x;
+                    players[id].targetY = p.y;
+                    players[id].color = p.color;
+                }
+            }
+        }
+        // Remove players not in list
+        for (let id in players) {
+            if (id !== myId && !data.players[id]) {
+                delete players[id];
             }
         }
         updatePlayerCount();
@@ -187,7 +242,7 @@ function handleData(data, conn) {
 }
 
 function broadcastPlayers() {
-    const msg = { type: 'players', players: players };
+    const msg = { type: 'players', players: getPlayersData() };
     connections.forEach(c => {
         if (c.open) c.send(msg);
     });
@@ -245,7 +300,7 @@ function handleJoystick(touch) {
     const stickY = Math.sin(angle) * dist;
     stickEl.style.transform = `translate(calc(-50% + ${stickX}px), calc(-50% + ${stickY}px))`;
     
-    const speed = 6;
+    const speed = 5;
     velocity.x = (dist / maxDist) * Math.cos(angle) * speed;
     velocity.y = (dist / maxDist) * Math.sin(angle) * speed;
 }
@@ -257,10 +312,14 @@ window.addEventListener('keyup', e => { keys[e.key.toLowerCase()] = false; keys[
 
 let lastSend = 0;
 
+function lerp(a, b, t) {
+    return a + (b - a) * t;
+}
+
 function update() {
     if (!gameStarted) return;
     
-    // Keyboard
+    // Keyboard input
     let kx = 0, ky = 0;
     if (keys['w'] || keys['ArrowUp']) ky = -1;
     if (keys['s'] || keys['ArrowDown']) ky = 1;
@@ -269,25 +328,54 @@ function update() {
     
     if (kx !== 0 || ky !== 0) {
         const len = Math.sqrt(kx*kx + ky*ky);
-        velocity.x = (kx / len) * 6;
-        velocity.y = (ky / len) * 6;
+        velocity.x = (kx / len) * 5;
+        velocity.y = (ky / len) * 5;
     } else if (!joystickActive) {
         velocity.x = 0;
         velocity.y = 0;
     }
     
+    // Move self
     myPos.x += velocity.x;
     myPos.y += velocity.y;
     myPos.x = Math.max(25, Math.min(canvas.width - 25, myPos.x));
     myPos.y = Math.max(25, Math.min(canvas.height - 25, myPos.y));
     
-    players[myId] = { x: myPos.x, y: myPos.y, color: myColor };
+    // Update my player data (no interpolation for self)
+    players[myId] = { 
+        x: myPos.x, y: myPos.y, 
+        targetX: myPos.x, targetY: myPos.y,
+        vx: velocity.x, vy: velocity.y,
+        color: myColor 
+    };
     
-    // Send position
+    // INTERPOLATE other players smoothly!
+    for (let id in players) {
+        if (id === myId) continue;
+        
+        const p = players[id];
+        
+        // Predict where they're going based on velocity
+        const predictedX = p.targetX + (p.vx || 0);
+        const predictedY = p.targetY + (p.vy || 0);
+        
+        // Smooth interpolation towards predicted position
+        p.x = lerp(p.x, predictedX, LERP_SPEED);
+        p.y = lerp(p.y, predictedY, LERP_SPEED);
+    }
+    
+    // Send position at 20fps (every 50ms)
     const now = Date.now();
-    if (now - lastSend > 33) { // ~30fps network
+    if (now - lastSend > 50) {
         lastSend = now;
-        const msg = { type: 'move', id: myId, x: myPos.x, y: myPos.y };
+        const msg = { 
+            type: 'move', 
+            id: myId, 
+            x: myPos.x, 
+            y: myPos.y,
+            vx: velocity.x,
+            vy: velocity.y
+        };
         connections.forEach(c => {
             if (c.open) c.send(msg);
         });
@@ -298,7 +386,7 @@ function draw() {
     ctx.fillStyle = '#111';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     
-    // Draw players
+    // Draw all players
     for (let id in players) {
         const p = players[id];
         
@@ -308,26 +396,18 @@ function draw() {
         ctx.fillStyle = 'rgba(0,0,0,0.3)';
         ctx.fill();
         
-        // Dot
+        // Main dot
         ctx.beginPath();
         ctx.arc(p.x, p.y, 25, 0, Math.PI * 2);
         ctx.fillStyle = p.color;
         ctx.fill();
         
-        // Outline for self
+        // White ring for self
         if (id === myId) {
             ctx.strokeStyle = '#fff';
             ctx.lineWidth = 3;
             ctx.stroke();
         }
-    }
-    
-    // Instructions
-    if (!gameStarted) {
-        ctx.fillStyle = '#666';
-        ctx.font = '16px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText('Host or Join a game to start', canvas.width/2, canvas.height/2);
     }
 }
 
